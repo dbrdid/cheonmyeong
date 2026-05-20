@@ -36,12 +36,7 @@ jobs:
       - name: Build & publish (macOS)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            npx electron-builder --mac --publish always
-          else
-            npx electron-builder --mac --publish never
-          fi
+        run: npx electron-builder --mac --publish always
 
   build-win:
     runs-on: windows-latest
@@ -61,9 +56,4 @@ jobs:
       - name: Build & publish (Windows)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            npx electron-builder --win --publish always
-          } else {
-            npx electron-builder --win --publish never
-          }
+        run: npx electron-builder --win --publish always
