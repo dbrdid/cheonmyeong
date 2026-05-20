@@ -1,0 +1,33 @@
+# 의존성
+node_modules/
+
+# 빌드 결과물
+dist/
+
+# 백업 파일
+*.backup-*
+*.bak
+
+# macOS
+.DS_Store
+
+# Claude / 로컬 설정
+.claude/
+
+# 에디터
+*.code-workspace
+
+# 환경 변수
+.env
+.env.local
+
+# 로그
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 프로젝트 전용 데이터 파일
+*.wsgroup.json
+*.wslayout.json
+*.wslide.json
+settings.json

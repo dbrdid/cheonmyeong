@@ -1,0 +1,92 @@
+{
+  "name": "worshipslide-pro",
+  "version": "1.0.0",
+  "description": "예배 슬라이드 프레젠테이션 앱",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-win": "electron-builder --win --x64",
+    "build-win-installer": "electron-builder --win nsis --x64",
+    "build-win-arm": "electron-builder --win --arm64",
+    "build-mac": "electron-builder --mac",
+    "release": "electron-builder --publish always",
+    "release-win": "electron-builder --win --x64 --publish always",
+    "release-mac": "electron-builder --mac --publish always"
+  },
+  "build": {
+    "appId": "com.worshipslide.pro",
+    "productName": "천명 프로그램",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "screen.html",
+      "package.json",
+      "icon.ico",
+      "icon.icns",
+      "icon.png",
+      "node_modules/**/*",
+      "!**/*.backup-*",
+      "!**/*.bak",
+      "!**/*.md",
+      "!.DS_Store",
+      "!.claude/**",
+      "!.gitignore",
+      "!*.code-workspace",
+      "!dist/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "icon.ico",
+      "artifactName": "천명프로그램-${version}-portable.exe"
+    },
+    "portable": {
+      "artifactName": "천명프로그램-${version}-portable.exe"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "icon": "icon.icns",
+      "category": "public.app-category.productivity"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "ko_KR"
+      ],
+      "artifactName": "천명프로그램-${version}-Setup.exe"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "dbrdid",
+        "repo": "cheonmyeong"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "keywords": [
+    "worship",
+    "slide",
+    "presentation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^1.50.1",
+    "@xmldom/xmldom": "^0.9.10",
+    "adm-zip": "^0.5.16",
+    "electron-updater": "^6.3.9"
+  }
+}

@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<!--
+  screen.html — 외부 송출 화면
+
+  역할:
+    예배 현장에서 프로젝터나 두 번째 모니터에 표시되는 슬라이드 출력 화면.
+    조작창(index.html)과는 Electron IPC로 통신하며 슬라이드 데이터를 수신한다.
+
+  주요 기능:
+    - 가사 + 배경 이미지/영상 표시
+    - 슬라이드 전환 시 크로스페이드(A/B 레이어 교차)
+    - 블랙아웃(화면 암전) 처리
+    - 크로마키(배경색 치환) 지원
+    - 키보드로 슬라이드 이동 조작 가능 (이벤트는 index.html로 전달)
+-->
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<style>
+/* 구글 웹폰트: 예배 가사용 명조/고딕 폰트 */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@700;900&family=Noto+Sans+KR:wght@300;400&display=swap');
+
+/* 전체 리셋: 여백 제거, 100% 크기 고정 */
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100vw;height:100vh;overflow:hidden;background:#000;cursor:none;}
+body{position:relative;}
+
+/*
+  A/B 레이어 — 크로스페이드를 위한 이중 레이어 구조
+  슬라이드 전환 시 한 레이어가 나타나고 다른 레이어가 사라지는 방식으로 부드럽게 전환된다.
+  #LA: 현재 표시 레이어 (z-index: 2, 불투명)
+  #LB: 다음 슬라이드를 미리 그리는 레이어 (z-index: 1, 투명)
+*/
+#LA,#LB{position:absolute;inset:0;width:100vw;height:100vh;transition:opacity var(--fd,0s) ease-in-out;background:#000;}
+#LA{opacity:1;z-index:2;}
+#LB{opacity:0;z-index:1;}
+
+/*
+  .ml — 미디어 레이어 (배경 이미지 / 영상)
+  이미지와 영상은 object-fit:cover로 화면에 꽉 채운다.
+*/
+.ml{position:absolute;inset:0;width:100vw;height:100vh;overflow:hidden;background:#000;}
+.ml img,.ml video{position:absolute;object-fit:cover;display:block;max-width:none;max-height:none;}
+
+/* .ov — 색상 오버레이 레이어 (현재 미사용, 확장용) */
+.ov{position:absolute;inset:0;}
+
+/* ── 크로마키 모드 ──
+   body에 .ck-on 클래스가 붙으면 배경이 지정한 크로마키 색상(기본: 초록)으로 바뀐다.
+   영상 편집 소프트웨어에서 배경을 제거할 때 사용한다.
+   배경 이미지/영상은 숨기고 텍스트 그림자도 제거해 깔끔한 크로마키를 만든다. */
+body.ck-on{background:var(--ck,#00b140)!important;}
+body.ck-on #LA,body.ck-on #LB{background:var(--ck,#00b140)!important;}
+body.ck-on .ml{background:var(--ck,#00b140)!important;}
+body.ck-on .ml img,body.ck-on .ml video{display:none!important;}
+body.ck-on .ov{display:none!important;}
+body.ck-on .ly{text-shadow:none!important;}
+body.ck-on .etb{text-shadow:none!important;}
+
+
+/*
+  .tl — 텍스트 레이어 (가사 표시 컨테이너)
+  레이아웃 타입에 따라 정렬 방식이 달라진다:
+    centerLyrics  : 화면 중앙
+    bottomCaption : 화면 하단
+    titleAndBody  : 왼쪽 정렬
+    scripture     : 중앙, 성경 구절 스타일
+    fullBackground: 하단 오버레이
+  .manual-pos: CSS 변수(--tx, --ty)로 위치를 픽셀 단위 대신 % 단위로 제어
+*/
+.tl{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:60px;z-index:2;pointer-events:none;}
+.tl.layout-centerLyrics{align-items:center;justify-content:center;text-align:center;padding:60px;}
+.tl.layout-bottomCaption{align-items:center;justify-content:flex-end;text-align:center;padding:60px 84px 76px;}
+.tl.layout-titleAndBody{align-items:flex-start;justify-content:center;text-align:left;padding:78px 96px;}
+.tl.layout-scripture{align-items:center;justify-content:center;text-align:center;padding:78px 110px;}
+.tl.layout-fullBackground{align-items:center;justify-content:flex-end;text-align:center;padding:60px 100px 66px;}
+/* 수동 위치 모드: CSS 변수 --tx, --ty 로 X/Y 위치 제어 */
+.tl.manual-pos{left:var(--tx,50%);top:var(--ty,50%);right:auto;bottom:auto;width:100%;height:100%;transform:translate(-50%,var(--ty-anc,-50%));}
+.tl.manual-pos.layout-bottomCaption{--ty-anc:-100%;}
+.tl.manual-pos.layout-fullBackground{--ty-anc:-100%;}
+
+/* .ly — 가사 텍스트 */
+.ly{font-weight:700;color:#fff;line-height:1.7;white-space:pre-wrap;word-break:keep-all;text-shadow:0 2px 8px rgba(0,0,0,0.95),0 0 24px rgba(0,0,0,0.75);}
+.tl.layout-bottomCaption .ly{line-height:1.55;background:rgba(0,0,0,.42);padding:14px 30px;border-radius:12px;max-width:92%;}
+.tl.layout-titleAndBody .ly{font-weight:500;line-height:1.7;max-width:86%;}
+.tl.layout-scripture .ly{font-family:'Noto Serif KR',serif;font-weight:500;line-height:1.95;max-width:86%;}
+.tl.layout-fullBackground .ly{font-size:.9em;line-height:1.55;background:rgba(0,0,0,.34);padding:10px 26px;border-radius:999px;max-width:90%;}
+
+/* .sb — 소제목 (번역문, 성경 구절 출처 등) */
+.sb{margin-top:16px;color:rgba(255,255,255,.4);font-family:'Noto Sans KR',sans-serif;font-weight:300;letter-spacing:1px;}
+.tl.layout-titleAndBody .sb{order:-1;margin-top:0;margin-bottom:18px;color:#fff;font-weight:700;letter-spacing:0;font-size:32px!important;}
+.tl.layout-scripture .sb{margin-top:22px;color:rgba(255,255,255,.55);}
+.tl.layout-fullBackground .sb{display:none;}
+
+/* #pbar — 자동재생 진행 바 (화면 하단, 보라색) */
+#pbar{position:absolute;bottom:0;left:0;height:4px;background:rgba(124,107,255,.8);width:0;z-index:10;display:none;}
+
+/* .etl / .etb — 추가 텍스트 박스 레이어 (번역문, 곡 정보 등) */
+.etl{position:absolute;inset:0;pointer-events:none;}
+.etb{position:absolute;text-align:center;line-height:1.6;font-weight:600;white-space:pre-wrap;word-break:keep-all;overflow:visible;box-sizing:border-box;display:flex;align-items:center;text-shadow:0 2px 8px rgba(0,0,0,0.95),0 0 24px rgba(0,0,0,0.75);}
+
+/*
+  #presOvl — 발표자 모드 오버레이
+  현재 슬라이드와 다음 슬라이드를 반투명 오버레이로 보여준다.
+  mode='pres'일 때만 표시된다.
+*/
+#presOvl{display:none;position:absolute;inset:0;background:rgba(0,0,0,.85);flex-direction:column;align-items:center;justify-content:center;gap:24px;z-index:20;}
+#presOvl.show{display:flex;}
+#presCur{color:#fff;font-family:'Noto Serif KR',serif;font-size:36px;text-align:center;padding:0 40px;white-space:pre-wrap;word-break:keep-all;}
+#presLbl{color:rgba(255,255,255,.4);font-size:13px;font-family:'Noto Sans KR',sans-serif;}
+#presNxt{color:rgba(255,255,255,.7);font-family:'Noto Serif KR',serif;font-size:22px;text-align:center;border-top:1px solid rgba(255,255,255,.1);padding:16px 40px 0;white-space:pre-wrap;word-break:keep-all;}
+
+/* #blankOvl — 블랙아웃 오버레이 (블랙아웃 ON 시 화면 전체를 검은색으로 덮음) */
+#blankOvl{position:absolute;inset:0;background:#000;opacity:0;transition:opacity .4s ease;z-index:50;pointer-events:none;}
+
+/* #markerLine — 위치 마커 선 (오른쪽 끝에 부착된 흰색 가로선) */
+#markerLine{position:absolute;right:0;width:48px;height:2px;background:#fff;z-index:15;display:none;pointer-events:none;box-shadow:0 0 6px rgba(255,255,255,.5);}
+</style>
+</head>
+<body>
+
+<!--
+  A 레이어 (#LA): 기본 표시 레이어
+  내부 구성:
+    #MA — 배경 미디어(이미지/영상)
+    #OA — 색상 오버레이
+    #TWA — 가사 텍스트 컨테이너 (#TA: 가사, #SA: 소제목)
+    #XA — 추가 텍스트 박스들
+-->
+<div id="LA">
+  <div class="ml" id="MA"></div>
+  <div class="ov" id="OA"></div>
+  <div class="tl layout-centerLyrics manual-pos" id="TWA">
+    <div class="ly" id="TA"></div>
+    <div class="sb" id="SA"></div>
+  </div>
+  <div class="etl" id="XA"></div>
+</div>
+
+<!-- B 레이어 (#LB): 크로스페이드용 예비 레이어 (초기에는 투명) -->
+<div id="LB">
+  <div class="ml" id="MB"></div>
+  <div class="ov" id="OB"></div>
+  <div class="tl layout-centerLyrics manual-pos" id="TWB">
+    <div class="ly" id="TB"></div>
+    <div class="sb" id="SB"></div>
+  </div>
+  <div class="etl" id="XB"></div>
+</div>
+
+<!-- 자동재생 진행 바 (width가 0→100%로 채워지는 애니메이션) -->
+<div id="pbar"></div>
+
+<!-- 발표자 모드 오버레이 (현재 슬라이드 + 다음 슬라이드 미리보기) -->
+<div id="presOvl">
+  <div id="presCur"></div>
+  <div id="presLbl">다음 슬라이드</div>
+  <div id="presNxt"></div>
+</div>
+
+<!-- 블랙아웃 오버레이 (opacity 0↔1 전환으로 암전 효과) -->
+<div id="blankOvl"></div>
+
+<!-- 위치 마커 선 (오른쪽 끝 고정, 위아래로만 이동) -->
+<div id="markerLine"></div>
+
+<script>
+// 현재 표시 중인 레이어 ('A' 또는 'B')
+let sL = 'A'
+
+// 진행 중인 페이드 애니메이션 목록 (새 슬라이드 전환 시 이전 애니메이션 취소용)
+let _fadeAnims = []
+
+/**
+ * 추가 텍스트 박스들을 지정된 레이어에 렌더링한다.
+ * 번역문, 곡 정보 등 슬라이드마다 다른 위치에 놓이는 자유 배치 텍스트박스.
+ *
+ * @param {string} layerId - 렌더링할 레이어 ID (예: 'XA', 'XB')
+ * @param {Array}  boxes   - 텍스트박스 설정 배열
+ *   각 항목 구조: { text, x, y, width, fontSize, fontColor, fontFamily, align,
+ *                   textAnchor, textShadowEnabled, textShadowIntensity,
+ *                   textOutlineEnabled, textOutlineWidth }
+ */
+function renderExtraBoxes(layerId, boxes) {
+  const layer = document.getElementById(layerId)
+  if(!layer) return
+  layer.innerHTML = ''
+  if(!Array.isArray(boxes) || !boxes.length) return
+
+  boxes.forEach(box => {
+    if(!box || !box.text) return
+
+    const el = document.createElement('div')
+    el.className = 'etb'
+    el.style.whiteSpace = 'pre-wrap'
+    el.textContent = String(box.text || '')
+
+    // 위치와 크기 설정 (단위: %)
+    const x = Number(box.x) || 50
+    const y = Number(box.y) || 72
+    const w = Number(box.width) || 42
+    const align = box.align || 'center'
+
+    // textAnchor: 'ctr'=중앙기준, 't'=상단기준, 'b'=하단기준
+    const bAnc = box.textAnchor || 'ctr'
+    el.style.left = x + '%'
+    el.style.top = y + '%'
+    el.style.width = w + '%'
+    el.style.transform = `translate(-50%,${bAnc==='t'?'0':bAnc==='b'?'-100':'-50'}%)`
+
+    // 폰트 스타일
+    el.style.fontSize = Math.round((Number(box.fontSize) || 24) * 1.4) + 'px'
+    el.style.color = box.fontColor || '#ffffff'
+    el.style.fontFamily = "'" + (box.fontFamily || 'Noto Sans KR') + "', sans-serif"
+
+    // 그림자 효과 (강도 0~100을 0~1로 정규화, null이면 CSS 기본값 유지)
+    const bSi = Math.max(0, Math.min(1, (box.textShadowIntensity != null ? box.textShadowIntensity : 80) / 100))
+    const bShadowVal = bSi > 0
+      ? `0 2px ${Math.round(8 * bSi + 4)}px rgba(0,0,0,${(0.95 * bSi).toFixed(2)}),0 0 ${Math.round(24 * bSi)}px rgba(0,0,0,${(0.75 * bSi).toFixed(2)})`
+      : null
+
+    // 외곽선(아웃라인) 효과
+    const bOutlineOn = (box.textOutlineEnabled === true)
+    const bOw = box.textOutlineWidth || 2
+
+    el.style.textAlign = align
+    el.style.justifyContent = align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center'
+    if(bShadowVal) el.style.textShadow = bShadowVal
+    el.style.webkitTextStroke = bOutlineOn ? `${bOw}px rgba(0,0,0,0.85)` : ''
+    el.style.paintOrder = bOutlineOn ? 'stroke fill' : ''
+
+    layer.appendChild(el)
+  })
+}
+
+function renderShapeBoxes(layerId, boxes){
+  const layer=document.getElementById(layerId);
+  if(!layer) return;
+  layer.innerHTML='';
+  if(!Array.isArray(boxes)||!boxes.length) return;
+  boxes.forEach(box=>{
+    const x=Number(box.x)||50;
+    const y=Number(box.y)||50;
+    const w=Math.max(0.2, Number(box.w)||10);
+    const h=Math.max(0.2, Number(box.h)||10);
+    const fillColor=box.fillColor||'transparent';
+    const lineColor=box.lineColor||'transparent';
+    const lineWidth=Math.max(0, Number(box.lineWidth)||0);
+    const el=document.createElement('div');
+    el.style.position='absolute';
+    el.style.left=x+'%';
+    el.style.top=y+'%';
+    el.style.width=w+'%';
+    el.style.height=h+'%';
+    el.style.transform='translate(-50%,-50%)';
+    el.style.background=fillColor;
+    const hasLine=(lineColor!=='transparent' && lineWidth>0);
+    el.style.border=hasLine ? `${lineWidth}px solid ${lineColor}` : 'none';
+    if(String(box.shapeType||'').includes('ellipse')) el.style.borderRadius='50%';
+    layer.appendChild(el);
+  });
+}
+
+/**
+ * 키 입력을 통일된 형태로 정규화한다.
+ * 스페이스바는 'Space' 문자열로 변환.
+ *
+ * @param {string} key - KeyboardEvent.key 값
+ * @returns {string} 정규화된 키 이름
+ */
+function normalizeOutputKey(key){
+  if(key===' ') return 'Space';
+  return String(key||'').trim();
+}
+
+/*
+  키보드 단축키 처리
+  - 방향키(→↓) / PageDown : 다음 슬라이드
+  - 방향키(←↑) / PageUp   : 이전 슬라이드
+  - 스페이스바              : 자동재생 토글
+  - Escape                  : 자동재생 중지
+  - 그 외 키               : 메인 조작창(index.html)으로 전달
+
+  주의: 이 화면은 외부 모니터에 전체화면으로 표시되므로,
+        키 이벤트를 잡아서 조작창에 전달하는 방식으로 원격 제어가 가능하다.
+*/
+document.addEventListener('keydown',e=>{
+  const key=normalizeOutputKey(e.key);
+
+  // 다음 슬라이드
+  if(e.key==='ArrowRight' || e.key==='ArrowDown' || key==='PageDown'){
+    e.preventDefault();
+    window.electronAPI?.sendOutputControl?.('next');
+    return;
+  }
+
+  // 이전 슬라이드
+  if(e.key==='ArrowLeft' || e.key==='ArrowUp' || key==='PageUp'){
+    e.preventDefault();
+    window.electronAPI?.sendOutputControl?.('prev');
+    return;
+  }
+
+  // 자동재생 토글
+  if(key==='Space'){
+    e.preventDefault();
+    window.electronAPI?.sendOutputControl?.('toggleAuto');
+    return;
+  }
+
+  // 자동재생 중지
+  if(e.key==='Escape'){
+    e.preventDefault();
+    window.electronAPI?.sendOutputControl?.('stopAuto');
+    return;
+  }
+
+  // 그 외 키는 메인 조작창으로 전달 (단축키 커스터마이징 지원)
+  window.electronAPI?.sendOutputControl?.({
+    type:'key',
+    key:e.key,
+    code:e.code || '',
+    altKey:!!e.altKey,
+    ctrlKey:!!e.ctrlKey,
+    metaKey:!!e.metaKey,
+    shiftKey:!!e.shiftKey
+  });
+});
+
+/**
+ * 지정된 레이어(A 또는 B)에 슬라이드 내용을 채운다.
+ * 가사, 배경 이미지/영상, 추가 텍스트박스 등 모든 시각 요소를 적용한다.
+ *
+ * @param {string} L  - 레이어 식별자 ('A' 또는 'B')
+ * @param {Object} d  - 슬라이드 데이터 객체
+ *   주요 속성:
+ *     d.lyrics          - 가사 텍스트
+ *     d.sub             - 소제목(번역문 등)
+ *     d.fs              - 폰트 크기(px)
+ *     d.fc              - 폰트 색상(hex)
+ *     d.ff              - 폰트 이름
+ *     d.textX/Y         - 텍스트 위치(%)
+ *     d.textWidth       - 텍스트 너비(%)
+ *     d.textAnchor      - 수직 기준점 ('t'/'ctr'/'b')
+ *     d.layoutType      - 레이아웃 타입
+ *     d.textShadowEnabled/Intensity - 그림자 설정
+ *     d.textOutlineEnabled/Width    - 아웃라인 설정
+ *     d.bgColor         - 배경 색상
+ *     d.mURL            - 배경 미디어 URL
+ *     d.mType           - 미디어 타입 ('image'/'video')
+ *     d.mOffX/Y         - 미디어 위치 오프셋(%)
+ *     d.mScale          - 미디어 확대 비율(%)
+ *     d.textBoxes       - 추가 텍스트박스 배열
+ */
+function fillL (L, d) {
+  // 레이어 배경색 적용
+  const layerEl = document.getElementById('L' + L)
+  if (layerEl) layerEl.style.backgroundColor = d.bgColor || ''
+
+  // 레이아웃 타입과 텍스트 위치 설정
+  const layout = d.layoutType || 'centerLyrics'
+  const tx = Number.isFinite(parseFloat(d.textX)) ? parseFloat(d.textX) : 50
+  const ty = Number.isFinite(parseFloat(d.textY)) ? parseFloat(d.textY) : 50
+
+  const textWrap = document.getElementById('TW' + L)
+  if (textWrap) {
+    textWrap.className = 'tl layout-' + layout + ' manual-pos'
+    textWrap.style.setProperty('--tx', tx + '%')
+    textWrap.style.setProperty('--ty', ty + '%')
+
+    // textAnchor: 텍스트 박스의 수직 기준점 (CSS 변수와 flex 정렬 동시 적용)
+    const tAnc = d.textAnchor || 'ctr'
+    textWrap.style.setProperty('--ty-anc', tAnc === 't' ? '0%' : tAnc === 'b' ? '-100%' : '-50%')
+    textWrap.style.justifyContent = tAnc === 't' ? 'flex-start' : tAnc === 'b' ? 'flex-end' : ''
+
+    // 텍스트 너비 설정 (없으면 CSS 기본값 사용)
+    if (Number.isFinite(parseFloat(d.textWidth))) {
+      textWrap.style.width = parseFloat(d.textWidth) + '%'
+      textWrap.style.maxWidth = 'none'
+    } else {
+      textWrap.style.width = ''
+      textWrap.style.maxWidth = ''
+    }
+  }
+
+  // 가사 텍스트와 스타일 적용
+  const tEl = document.getElementById('T'+L)
+  tEl.textContent = d.lyrics || ''
+
+  // 그림자 강도(0~100) → CSS 값 계산 (송출 화면에서는 항상 그림자 표시)
+  const shadowSi = Math.max(0, Math.min(1, (d.textShadowIntensity != null ? d.textShadowIntensity : 80) / 100))
+  const outlineOn = (d.textOutlineEnabled === true)
+  const outlineW = d.textOutlineWidth || 2
+  // shadowVal이 null이면 CSS 기본값(.ly)의 그림자가 그대로 유지됨
+  const shadowVal = shadowSi > 0
+    ? `0 2px ${Math.round(8 * shadowSi + 4)}px rgba(0,0,0,${(0.95 * shadowSi).toFixed(2)}),0 0 ${Math.round(24 * shadowSi)}px rgba(0,0,0,${(0.75 * shadowSi).toFixed(2)})`
+    : null
+
+  // 가사 인라인 스타일 일괄 적용 (text-shadow:none 인라인 설정 금지 → CSS 기본값 유지)
+  let styleStr =
+    `font-size:${d.fs || 52}px;`+
+    `color:${d.fc || '#fff'};`+
+    `font-family:'${d.ff || 'Noto Serif KR'}',serif;`
+  if(shadowVal) styleStr += `text-shadow:${shadowVal};`
+  if(outlineOn) styleStr += `-webkit-text-stroke:${outlineW}px rgba(0,0,0,0.85);paint-order:stroke fill;`
+  tEl.setAttribute('style', styleStr)
+
+  // 소제목 텍스트와 크기 적용
+  document.getElementById('S'+L).textContent = d.sub || ''
+  document.getElementById('S'+L).style.fontSize = Math.max((d.fs || 52) * 0.35, 14) + 'px'
+
+  // 구버전 호환 요소 초기화
+  document.getElementById('C'+L).textContent = ''
+  document.getElementById('C'+L).style.background = 'transparent'
+  document.getElementById('C'+L).style.color = 'transparent'
+  renderShapeBoxes('O'+L, d.shapeBoxes || [])
+
+  // 추가 텍스트박스(번역문 등) 렌더링
+  renderExtraBoxes('X'+L, d.textBoxes || [])
+
+  // 배경 미디어(이미지/영상) 처리
+  // 캐시 키로 동일한 미디어가 중복 렌더링되지 않도록 최적화
+  const ml = document.getElementById('M'+L)
+  const wantSrc = d.mURL || ''
+  const mOffX = d.mOffX ?? 50
+  const mOffY = d.mOffY ?? 50
+  const mScale = d.mScale ?? 100
+  const mFit = ['cover','contain','fill'].includes(d.mFit) ? d.mFit : 'cover'
+  const mCacheKey = `${wantSrc}|${mOffX}|${mOffY}|${mScale}|${mFit}`
+  if (ml.dataset.cacheKey !== mCacheKey) {
+    ml.dataset.cacheKey = mCacheKey
+    while (ml.firstChild) ml.removeChild(ml.firstChild)
+    if (d.mURL) {
+      // 미디어를 지정한 오프셋/배율/맞춤 모드로 배치하는 공통 CSS
+      const bgCss = `position:absolute;width:${mScale}%;height:${mScale}%;left:${mOffX}%;top:${mOffY}%;transform:translate(-50%,-50%);object-fit:${mFit};max-width:none;max-height:none;display:block;`
+      if (d.mType === 'image') {
+        const img = new Image()
+        img.src = d.mURL
+        img.style.cssText = bgCss
+        ml.appendChild(img)
+      } else {
+        // 영상: 자동 재생, 반복, 음소거 고정
+        const vid = document.createElement('video')
+        vid.src = d.mURL
+        vid.autoplay = vid.loop = vid.muted = true
+        vid.style.cssText = bgCss
+        ml.appendChild(vid)
+      }
+    }
+  }
+}
+
+/**
+ * 슬라이드를 화면에 표시한다.
+ * 페이드 시간(fd)이 있으면 A↔B 레이어를 교차해 크로스페이드,
+ * 없으면 현재 레이어를 바로 업데이트한다.
+ *
+ * 크로스페이드 동작:
+ *   1. 사용하지 않는 레이어(nL)에 새 슬라이드 내용을 미리 그린다.
+ *   2. nL을 불투명(opacity: 1), 현재 레이어(sL)를 투명(opacity: 0)으로 전환.
+ *   3. Web Animations API로 두 레이어를 동시에 애니메이션.
+ *   4. sL ↔ nL 교체.
+ *
+ * @param {Object} d - 슬라이드 데이터 (fillL과 동일한 구조)
+ */
+function applySlide (d) {
+  const fd = d.fd || 0  // 페이드 시간(초)
+
+  // 이전에 실행 중인 페이드 애니메이션 즉시 취소
+  _fadeAnims.forEach(a => a.cancel())
+  _fadeAnims = []
+
+  if (fd > 0) {
+    // ── 크로스페이드 모드 ──
+    const nL = sL === 'A' ? 'B' : 'A'   // 다음에 사용할 레이어
+    const nEl = document.getElementById('L' + nL)
+    const sEl = document.getElementById('L' + sL)
+
+    // 새 레이어에 내용 채우기
+    fillL(nL, d)
+
+    // z-index: 새 레이어를 앞으로, 현재 레이어를 뒤로
+    nEl.style.zIndex = '2'
+    sEl.style.zIndex = '1'
+
+    // inline style을 최종값으로 미리 설정 (애니메이션 취소 시 올바른 상태 유지)
+    nEl.style.opacity = '1'
+
+    const opts = { duration: fd * 1000, easing: 'ease-in-out' }
+    const aIn  = nEl.animate([{ opacity: 0 }, { opacity: 1 }], opts)   // 새 레이어 페이드 인
+    const aOut = sEl.animate([{ opacity: 1 }, { opacity: 0 }], opts)   // 현재 레이어 페이드 아웃
+    aOut.onfinish = () => { sEl.style.opacity = '0' }
+    _fadeAnims = [aIn, aOut]
+
+    sL = nL  // 현재 레이어 교체
+  } else {
+    // ── 즉시 전환 모드 ──
+    const otherL = sL === 'A' ? 'B' : 'A'
+    document.getElementById('L' + sL).style.opacity    = '1'
+    document.getElementById('L' + sL).style.zIndex     = '2'
+    document.getElementById('L' + otherL).style.opacity = '0'
+    document.getElementById('L' + otherL).style.zIndex  = '1'
+    fillL(sL, d)
+  }
+
+  // 크로마키 색상과 body 배경색 동기화
+  const ckColor = d.bgColor || d.chromaKeyColor || '#00b140'
+  document.body.style.setProperty('--ck', ckColor)
+  document.body.classList.toggle('ck-on', !!d.chromaKey)
+  if (!d.chromaKey) {
+    document.body.style.background = d.bgColor || '#000'
+  }
+
+  // 발표자 모드: 반투명 오버레이로 현재/다음 슬라이드 텍스트 표시
+  const presOvl = document.getElementById('presOvl')
+  if (d.mode === 'pres') {
+    presOvl.classList.add('show')
+    const _presMainText = d.lyrics || (d.textBoxes||[]).find(b=>b.role==='main')?.text || ''
+    document.getElementById('presCur').textContent = _presMainText
+    document.getElementById('presNxt').textContent = d.nxt || '(끝)'
+  } else {
+    presOvl.classList.remove('show')
+  }
+}
+
+/*
+  IPC 이벤트 수신 등록
+  조작창(index.html)에서 보내는 명령을 수신해 화면에 반영한다.
+*/
+if (window.electronAPI) {
+  // 슬라이드 데이터 수신 → 화면 업데이트
+  window.electronAPI.onSlideUpdate(applySlide)
+
+  // 블랙아웃 ON/OFF: #blankOvl의 opacity를 1↔0으로 전환
+  window.electronAPI.onBlankScreen(on => {
+    document.getElementById('blankOvl').style.opacity = on ? '1' : '0'
+  })
+
+  // 자동재생 진행 바는 조작창(index.html)에서만 표시하므로 이 화면에서는 무시
+  window.electronAPI.onProgressBar(({ action, secs }) => {
+    // progress bar는 송출 화면에 표시하지 않음
+  })
+
+  // 위치 마커 선: { visible, y } 수신 → 표시/숨김 및 위치 적용
+  window.electronAPI.onMarkerLine(({ visible, y }) => {
+    const ml = document.getElementById('markerLine')
+    if (!ml) return
+    ml.style.display = visible ? 'block' : 'none'
+    if (visible) ml.style.top = y + '%'
+  })
+}
+</script>
+</body>
+</html>
